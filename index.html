@@ -98,7 +98,6 @@
 
         /* Root pad clicked by user to trigger chord */
         .pad.selected-chord-root {
-            ring: 2px;
             outline: 2px solid #00f0ff;
             outline-offset: -2px;
         }
@@ -153,6 +152,42 @@
             50% {
                 transform: translate(-50%, -50%) scale(1.08);
                 opacity: 0.65;
+            }
+        }
+
+        /* Animated Floating Notification Toast */
+        .toast-popup {
+            position: fixed;
+            z-index: 100;
+            background-color: rgba(24, 24, 27, 0.95);
+            border: 1px solid #ff7700;
+            color: #f4f4f5;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 700;
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.6), 0 0 10px rgba(255, 119, 0, 0.4);
+            backdrop-filter: blur(8px);
+            pointer-events: none;
+            white-space: nowrap;
+        }
+
+        @keyframes floatFadeUp {
+            0% {
+                opacity: 0;
+                transform: translate(-50%, 0) scale(0.9);
+            }
+            15% {
+                opacity: 1;
+                transform: translate(-50%, -10px) scale(1);
+            }
+            75% {
+                opacity: 1;
+                transform: translate(-50%, -18px) scale(1);
+            }
+            100% {
+                opacity: 0;
+                transform: translate(-50%, -30px) scale(0.95);
             }
         }
     </style>
@@ -284,6 +319,8 @@
                     <div class="flex flex-col">
                         <label class="text-[11px] text-zinc-400 mb-1">Inversion</label>
                         <select id="chordInversion" class="px-2.5 py-1.5 rounded-md text-xs font-semibold cursor-pointer">
+                            <option value="-2">-2nd Inversion</option>
+                            <option value="-1">-1st Inversion</option>
                             <option value="0" selected>Root Position</option>
                             <option value="1">1st Inversion</option>
                             <option value="2">2nd Inversion</option>
@@ -347,6 +384,7 @@
         let selectedBaseMidiNote = null;
         let selectedPadRow = null;
         let selectedPadCol = null;
+        let lastClickedPadEl = null;
 
         // Grid row offsets
         const offsets = {
@@ -397,67 +435,250 @@
         }
 
         function getNoteNameWithOctave(midi) {
-            const name = noteNames[midi % 12];
+            const name = noteNames[(midi % 12 + 12) % 12];
             const octave = Math.floor(midi / 12) - 1;
             return `${name}${octave}`;
         }
 
+        function getChordIntervals(chordName, inversion) {
+            const baseIntervals = chords[chordName];
+            if (!baseIntervals) return [];
+            let intervals = [...baseIntervals];
+            const n = intervals.length;
+
+            if (inversion > 0) {
+                for (let i = 0; i < inversion; i++) {
+                    const shiftIdx = i % n;
+                    intervals[shiftIdx] += 12;
+                }
+                intervals.sort((a, b) => a - b);
+            } else if (inversion < 0) {
+                const absInv = Math.abs(inversion);
+                for (let i = 0; i < absInv; i++) {
+                    const shiftIdx = n - 1 - (i % n);
+                    intervals[shiftIdx] -= 12;
+                }
+                intervals.sort((a, b) => a - b);
+            }
+            return intervals;
+        }
+
+        // Helper to calculate offset from root note in semitones (Chromatic) or scale steps (In-Key)
+        function getTargetOffset(rootMidi, targetMidi, layout, scaleNotesClasses) {
+            if (layout === 'Chromatic') {
+                return targetMidi - rootMidi;
+            } else {
+                const rootPitchClass = (rootMidi % 12 + 12) % 12;
+                const targetPitchClass = (targetMidi % 12 + 12) % 12;
+
+                if (!scaleNotesClasses.includes(targetPitchClass) || !scaleNotesClasses.includes(rootPitchClass)) {
+                    return null;
+                }
+
+                const rootOct = Math.floor(rootMidi / 12);
+                const targetOct = Math.floor(targetMidi / 12);
+
+                const rootIdx = scaleNotesClasses.indexOf(rootPitchClass);
+                const targetIdx = scaleNotesClasses.indexOf(targetPitchClass);
+
+                const scaleLen = scaleNotesClasses.length;
+                const rootScaleStep = rootOct * scaleLen + rootIdx;
+                const targetScaleStep = targetOct * scaleLen + targetIdx;
+
+                return targetScaleStep - rootScaleStep;
+            }
+        }
+
+        // Calculates exact pad position (Row, Col) following the Pad Interval line-break rules
+        function calculatePadForNote(r0, c0, rootMidi, targetMidi, layout, offsetType, scaleNotesClasses) {
+            const L = offsets[layout]?.[offsetType] ?? (layout === 'Chromatic' ? 5 : 3);
+            const breakDist = (offsetType === '3rd') ? L + 1 : L;
+            const offset = getTargetOffset(rootMidi, targetMidi, layout, scaleNotesClasses);
+
+            if (offset === null) return null;
+
+            let R = r0;
+            let C = c0 + offset;
+
+            if (offset >= 0) {
+                while ((C - c0 >= breakDist) || (C >= 8)) {
+                    R += 1;
+                    C -= L;
+                }
+            } else {
+                while ((C - c0 <= -breakDist) || (C < 0)) {
+                    R -= 1;
+                    C += L;
+                }
+            }
+
+            if (R >= 0 && R < 8 && C >= 0 && C < 8) {
+                return { row: R, col: C };
+            }
+
+            return null; // Out of 8x8 grid bounds
+        }
+
+        function showToast(text) {
+            let toast = document.getElementById('toastNotice');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'toastNotice';
+                document.body.appendChild(toast);
+            }
+
+            if (lastClickedPadEl) {
+                const rect = lastClickedPadEl.getBoundingClientRect();
+                toast.style.left = `${rect.left + rect.width / 2}px`;
+                toast.style.top = `${rect.top}px`;
+            } else {
+                toast.style.left = '50%';
+                toast.style.top = '120px';
+            }
+
+            toast.className = 'toast-popup';
+            toast.textContent = text;
+            toast.style.animation = 'none';
+            toast.offsetHeight;
+            toast.style.animation = 'floatFadeUp 1.8s cubic-bezier(0.16, 1, 0.3, 1) forwards';
+        }
+
         function buildGrid() {
+            if (!gridContainer) return;
             gridContainer.innerHTML = '';
 
-            const gridRoot = parseInt(ui.gridRoot?.value ?? '0');
-            const gridOctaveVal = parseInt(ui.gridOctave?.value ?? '2');
+            const rootPitchClass = parseInt(ui.gridRoot?.value ?? '0');
+            const baseOctave = parseInt(ui.gridOctave?.value ?? '2');
             const scaleName = ui.gridScale?.value ?? 'Minor';
             const layout = ui.layoutMode?.value ?? 'InKey';
             const offsetType = ui.rowOffset?.value ?? '4ths';
-            const rowOffsetValue = offsets[layout]?.[offsetType] ?? (layout === 'Chromatic' ? 5 : 3);
 
-            const scaleNotesClasses = getScaleNotes(gridRoot, scaleName);
-            const baseRootMidi = (gridOctaveVal + 1) * 12 + gridRoot;
+            const baseMidiNote = (baseOctave + 1) * 12 + rootPitchClass;
+            const scaleNotesClasses = getScaleNotes(rootPitchClass, scaleName);
+            const rowOffsetVal = offsets[layout]?.[offsetType] ?? (layout === 'Chromatic' ? 5 : 3);
 
-            // Render 8x8 Push grid (Row 7 at top down to Row 0 at bottom)
             for (let r = 7; r >= 0; r--) {
                 for (let c = 0; c < 8; c++) {
-                    let midi;
+                    let midiPitch;
+                    let isInScale = false;
+                    let isScaleRoot = false;
+
                     if (layout === 'Chromatic') {
-                        midi = baseRootMidi + (r * rowOffsetValue) + c;
+                        midiPitch = baseMidiNote + (r * rowOffsetVal) + c;
+                        const pitchClass = (midiPitch % 12 + 12) % 12;
+                        isInScale = scaleNotesClasses.includes(pitchClass);
+                        isScaleRoot = (pitchClass === rootPitchClass);
                     } else {
-                        // In-Key Mode layout
-                        const stepIndex = (r * rowOffsetValue) + c;
+                        const stepIndex = (r * rowOffsetVal) + c;
                         const scaleLen = scaleNotesClasses.length;
                         const octShift = Math.floor(stepIndex / scaleLen);
-                        const degreeIdx = ((stepIndex % scaleLen) + scaleLen) % scaleLen;
-                        const pitchClass = scaleNotesClasses[degreeIdx];
-                        midi = (gridOctaveVal + 1 + octShift) * 12 + pitchClass;
+                        const scaleDegreeIdx = stepIndex % scaleLen;
+                        const pitchClass = scaleNotesClasses[scaleDegreeIdx];
+                        midiPitch = baseMidiNote + (octShift * 12) + scaleIntervals[scaleName][scaleDegreeIdx];
+                        isInScale = true;
+                        isScaleRoot = (pitchClass === rootPitchClass);
                     }
-
-                    const pitchClass = midi % 12;
-                    const isScaleRoot = pitchClass === gridRoot;
-                    const isInScale = scaleNotesClasses.includes(pitchClass);
 
                     const pad = document.createElement('div');
                     pad.className = 'pad';
-                    pad.dataset.midi = midi;
+                    if (isScaleRoot) pad.classList.add('scale-root');
+                    else if (isInScale) pad.classList.add('in-scale');
+
                     pad.dataset.row = r;
                     pad.dataset.col = c;
+                    pad.dataset.midi = midiPitch;
 
-                    if (isScaleRoot) {
-                        pad.classList.add('scale-root');
-                    } else if (isInScale) {
-                        pad.classList.add('in-scale');
-                    }
-
-                    pad.innerText = getNoteNameWithOctave(midi);
+                    const noteName = getNoteNameWithOctave(midiPitch);
+                    pad.innerHTML = `<span>${noteName}</span>`;
 
                     pad.addEventListener('click', () => {
-                        selectedBaseMidiNote = midi;
+                        lastClickedPadEl = pad;
+                        selectedBaseMidiNote = midiPitch;
                         selectedPadRow = r;
                         selectedPadCol = c;
-                        selectedRootLabel.innerText = `${getNoteNameWithOctave(midi)} (MIDI ${midi})`;
+                        if (selectedRootLabel) {
+                            selectedRootLabel.textContent = `${noteName} (Row ${r + 1}, Col ${c + 1})`;
+                        }
+                        updateChordDropdown();
                         applyChordHighlight();
                     });
 
                     gridContainer.appendChild(pad);
+                }
+            }
+
+            if (activePadCountEl) activePadCountEl.textContent = '64';
+        }
+
+        function updateChordDropdown() {
+            if (!ui.chordType) return;
+
+            const gridRoot = parseInt(ui.gridRoot?.value ?? '0');
+            const scaleName = ui.gridScale?.value ?? 'Minor';
+            const layout = ui.layoutMode?.value ?? 'InKey';
+            const offsetType = ui.rowOffset?.value ?? '4ths';
+            const scaleNotesClasses = getScaleNotes(gridRoot, scaleName);
+            const inversion = parseInt(ui.chordInversion?.value ?? '0');
+
+            const options = Array.from(ui.chordType.querySelectorAll('option'));
+            options.forEach(option => {
+                const chordKey = option.value;
+                if (chordKey === 'None' || !chords[chordKey]) {
+                    option.hidden = false;
+                    option.disabled = false;
+                    option.style.display = '';
+                    return;
+                }
+
+                if (selectedBaseMidiNote === null || selectedPadRow === null || selectedPadCol === null) {
+                    option.hidden = false;
+                    option.disabled = false;
+                    option.style.display = '';
+                    return;
+                }
+
+                const targetMidiNotes = getChordIntervals(chordKey, inversion).map(interval => selectedBaseMidiNote + interval);
+                
+                const isFullyAvailable = targetMidiNotes.every(midi => {
+                    const padPos = calculatePadForNote(selectedPadRow, selectedPadCol, selectedBaseMidiNote, midi, layout, offsetType, scaleNotesClasses);
+                    return padPos !== null;
+                });
+
+                if (isFullyAvailable) {
+                    option.hidden = false;
+                    option.disabled = false;
+                    option.style.display = '';
+                } else {
+                    option.hidden = true;
+                    option.disabled = true;
+                    option.style.display = 'none';
+                }
+            });
+
+            const optgroups = ui.chordType.querySelectorAll('optgroup');
+            optgroups.forEach(og => {
+                const visibleOpts = Array.from(og.querySelectorAll('option')).filter(opt => !opt.hidden && !opt.disabled);
+                if (visibleOpts.length === 0) {
+                    og.hidden = true;
+                    og.style.display = 'none';
+                } else {
+                    og.hidden = false;
+                    og.style.display = '';
+                }
+            });
+
+            const currentVal = ui.chordType.value;
+            const selectedOpt = ui.chordType.querySelector(`option[value="${currentVal}"]`);
+            if (currentVal !== 'None' && selectedOpt && (selectedOpt.hidden || selectedOpt.disabled)) {
+                const firstAvailable = Array.from(ui.chordType.querySelectorAll('option')).find(
+                    opt => opt.value !== 'None' && !opt.hidden && !opt.disabled
+                );
+                if (firstAvailable) {
+                    ui.chordType.value = firstAvailable.value;
+                    showToast(`⚠️ ${firstAvailable.value}`);
+                } else {
+                    ui.chordType.value = 'None';
+                    showToast('⚠️ None');
                 }
             }
         }
@@ -465,13 +686,16 @@
         function applyChordHighlight() {
             const chordTypeName = ui.chordType?.value ?? 'None';
             const inversion = parseInt(ui.chordInversion?.value ?? '0');
-            
-            // Clear previous pad highlights
+            const gridRoot = parseInt(ui.gridRoot?.value ?? '0');
+            const scaleName = ui.gridScale?.value ?? 'Minor';
+            const layout = ui.layoutMode?.value ?? 'InKey';
+            const offsetType = ui.rowOffset?.value ?? '4ths';
+            const scaleNotesClasses = getScaleNotes(gridRoot, scaleName);
+
             document.querySelectorAll('.pad').forEach(p => {
                 p.classList.remove('chord-target', 'selected-chord-root');
             });
 
-            // Container for ghost pads
             let ghostContainer = document.getElementById('ghostContainer');
             if (!ghostContainer) {
                 ghostContainer = document.createElement('div');
@@ -480,73 +704,39 @@
             } else {
                 ghostContainer.innerHTML = '';
             }
+
+            const pads = Array.from(document.querySelectorAll('.pad'));
+
+            if (selectedBaseMidiNote !== null && selectedPadRow !== null && selectedPadCol !== null) {
+                const selectedPad = pads.find(p => parseInt(p.dataset.row) === selectedPadRow && parseInt(p.dataset.col) === selectedPadCol);
+                if (selectedPad) {
+                    selectedPad.classList.add('selected-chord-root');
+                }
+            }
             
             if (chordTypeName === 'None' || selectedBaseMidiNote === null || !chords[chordTypeName]) {
                 return;
             }
 
-            const baseIntervals = [...chords[chordTypeName]];
-            
-            // Apply Inversions
-            for (let i = 0; i < inversion; i++) {
-                if (i < baseIntervals.length) {
-                    baseIntervals[i] += 12;
-                }
-            }
-
-            const targetMidiNotes = baseIntervals.map(interval => selectedBaseMidiNote + interval);
-            const pads = Array.from(document.querySelectorAll('.pad'));
+            const targetMidiNotes = getChordIntervals(chordTypeName, inversion).map(interval => selectedBaseMidiNote + interval);
             const foundTargetMidis = new Set();
 
-            // Select one single pad per chord pitch to create a unified, ergonomic chord shape
-            targetMidiNotes.forEach((targetMidi, index) => {
-                // For root note (index 0), prioritize the exact pad clicked by the user
-                if (index === 0 && selectedPadRow !== null && selectedPadCol !== null) {
-                    const exactRootPad = pads.find(p => parseInt(p.dataset.row) === selectedPadRow && parseInt(p.dataset.col) === selectedPadCol);
-                    if (exactRootPad && parseInt(exactRootPad.dataset.midi) === targetMidi) {
-                        exactRootPad.classList.add('selected-chord-root', 'chord-target');
-                        foundTargetMidis.add(targetMidi);
-                        return;
-                    }
-                }
-
-                // Find matching pads on grid for this chord pitch
-                const matchingPads = pads.filter(p => parseInt(p.dataset.midi) === targetMidi);
-
-                if (matchingPads.length > 0) {
-                    let bestPad = null;
-                    let minDistance = Infinity;
-
-                    matchingPads.forEach(p => {
-                        const r = parseInt(p.dataset.row);
-                        const c = parseInt(p.dataset.col);
-                        
-                        // Calculate grid distance from the user's selected root pad position
-                        let dist = Math.pow(r - selectedPadRow, 2) + Math.pow(c - selectedPadCol, 2);
-                        if (r < selectedPadRow) dist += 50; // Favor standard upward chord fingering shapes
-
-                        if (dist < minDistance) {
-                            minDistance = dist;
-                            bestPad = p;
+            targetMidiNotes.forEach(targetMidi => {
+                const padPos = calculatePadForNote(selectedPadRow, selectedPadCol, selectedBaseMidiNote, targetMidi, layout, offsetType, scaleNotesClasses);
+                if (padPos) {
+                    const targetPad = pads.find(p => parseInt(p.dataset.row) === padPos.row && parseInt(p.dataset.col) === padPos.col);
+                    if (targetPad) {
+                        targetPad.classList.add('chord-target');
+                        if (targetMidi === selectedBaseMidiNote) {
+                            targetPad.classList.add('selected-chord-root');
                         }
-                    });
-
-                    if (bestPad) {
-                        bestPad.classList.add('chord-target');
-                        if (index === 0) bestPad.classList.add('selected-chord-root');
                         foundTargetMidis.add(targetMidi);
                     }
                 }
             });
 
-            // Calculate and render Ghost Pads for missing chord pitches
-            const gridRoot = parseInt(ui.gridRoot?.value ?? '0');
             const gridOctaveVal = parseInt(ui.gridOctave?.value ?? '2');
-            const scaleName = ui.gridScale?.value ?? 'Minor';
-            const layout = ui.layoutMode?.value ?? 'InKey';
-            const offsetType = ui.rowOffset?.value ?? '4ths';
             const rowOffsetValue = offsets[layout]?.[offsetType] ?? (layout === 'Chromatic' ? 5 : 3);
-            const scaleNotesClasses = getScaleNotes(gridRoot, scaleName);
             const baseMidiNote = (gridOctaveVal + 1) * 12 + gridRoot;
 
             targetMidiNotes.forEach(targetMidi => {
@@ -558,18 +748,15 @@
                         r = Math.floor(diff / rowOffsetValue);
                         c = diff - (r * rowOffsetValue);
                     } else {
-                        // In-Key Mode
-                        const targetPitchClass = targetMidi % 12;
+                        const targetPitchClass = (targetMidi % 12 + 12) % 12;
                         
                         if (scaleNotesClasses.includes(targetPitchClass)) {
-                            // In scale note, but falls outside visible 8x8 row range
                             const scaleIndex = scaleNotesClasses.indexOf(targetPitchClass);
                             const octaveDiff = Math.floor((targetMidi - baseMidiNote) / 12);
                             const stepIndex = octaveDiff * scaleNotesClasses.length + scaleIndex;
                             r = Math.floor(stepIndex / rowOffsetValue);
                             c = stepIndex - (r * rowOffsetValue);
                         } else {
-                            // Accidental outside scale: place intermediate ghost note between surrounding scale notes
                             let lowerMidi = targetMidi - 1;
                             while (!scaleNotesClasses.includes((lowerMidi % 12 + 12) % 12)) lowerMidi--;
                             let upperMidi = targetMidi + 1;
@@ -593,7 +780,6 @@
                         }
                     }
 
-                    // Clamp ghost pad coordinates to perimeter edges if off-grid
                     const clampedR = Math.max(-0.4, Math.min(7.4, r));
                     const clampedC = Math.max(-0.4, Math.min(7.4, c));
 
@@ -613,6 +799,7 @@
 
         function updateApp() {
             buildGrid();
+            updateChordDropdown();
             applyChordHighlight();
         }
 
@@ -622,9 +809,17 @@
             if (el) el.addEventListener('change', updateApp);
         });
 
-        ['chordType', 'chordInversion'].forEach(id => {
+        ['chordType'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', applyChordHighlight);
+        });
+
+        ['chordInversion'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('change', () => {
+                updateChordDropdown();
+                applyChordHighlight();
+            });
         });
 
         // Initialize application on load
