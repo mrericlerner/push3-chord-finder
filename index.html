@@ -345,6 +345,8 @@
 
         const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
         let selectedBaseMidiNote = null;
+        let selectedPadRow = null;
+        let selectedPadCol = null;
 
         // Grid row offsets
         const offsets = {
@@ -449,6 +451,8 @@
 
                     pad.addEventListener('click', () => {
                         selectedBaseMidiNote = midi;
+                        selectedPadRow = r;
+                        selectedPadCol = c;
                         selectedRootLabel.innerText = `${getNoteNameWithOctave(midi)} (MIDI ${midi})`;
                         applyChordHighlight();
                     });
@@ -481,12 +485,6 @@
                 return;
             }
 
-            // Mark clicked base root pad
-            const rootPad = Array.from(document.querySelectorAll('.pad')).find(p => parseInt(p.dataset.midi) === selectedBaseMidiNote);
-            if (rootPad) {
-                rootPad.classList.add('selected-chord-root');
-            }
-
             const baseIntervals = [...chords[chordTypeName]];
             
             // Apply Inversions
@@ -500,11 +498,44 @@
             const pads = Array.from(document.querySelectorAll('.pad'));
             const foundTargetMidis = new Set();
 
-            pads.forEach(pad => {
-                const midi = parseInt(pad.dataset.midi);
-                if (targetMidiNotes.includes(midi)) {
-                    pad.classList.add('chord-target');
-                    foundTargetMidis.add(midi);
+            // Select one single pad per chord pitch to create a unified, ergonomic chord shape
+            targetMidiNotes.forEach((targetMidi, index) => {
+                // For root note (index 0), prioritize the exact pad clicked by the user
+                if (index === 0 && selectedPadRow !== null && selectedPadCol !== null) {
+                    const exactRootPad = pads.find(p => parseInt(p.dataset.row) === selectedPadRow && parseInt(p.dataset.col) === selectedPadCol);
+                    if (exactRootPad && parseInt(exactRootPad.dataset.midi) === targetMidi) {
+                        exactRootPad.classList.add('selected-chord-root', 'chord-target');
+                        foundTargetMidis.add(targetMidi);
+                        return;
+                    }
+                }
+
+                // Find matching pads on grid for this chord pitch
+                const matchingPads = pads.filter(p => parseInt(p.dataset.midi) === targetMidi);
+
+                if (matchingPads.length > 0) {
+                    let bestPad = null;
+                    let minDistance = Infinity;
+
+                    matchingPads.forEach(p => {
+                        const r = parseInt(p.dataset.row);
+                        const c = parseInt(p.dataset.col);
+                        
+                        // Calculate grid distance from the user's selected root pad position
+                        let dist = Math.pow(r - selectedPadRow, 2) + Math.pow(c - selectedPadCol, 2);
+                        if (r < selectedPadRow) dist += 50; // Favor standard upward chord fingering shapes
+
+                        if (dist < minDistance) {
+                            minDistance = dist;
+                            bestPad = p;
+                        }
+                    });
+
+                    if (bestPad) {
+                        bestPad.classList.add('chord-target');
+                        if (index === 0) bestPad.classList.add('selected-chord-root');
+                        foundTargetMidis.add(targetMidi);
+                    }
                 }
             });
 
